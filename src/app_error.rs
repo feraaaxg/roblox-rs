@@ -2,7 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RobloxError {
-    // Базовые ошибки
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Reqwest error: {0}")]
@@ -16,7 +15,6 @@ pub enum RobloxError {
     #[error("Unexpected status code: {0}")]
     UnexpectedStatus(u16),
 
-    // Ошибки аутентификации
     #[error("Invalid authentication token: {0}")]
     InvalidToken(String),
     #[error("Authentication token expired")]
@@ -34,7 +32,6 @@ pub enum RobloxError {
     #[error("Invalid authentication ticket: {0}")]
     InvalidAuthenticationTicket(String),
 
-    // Ошибки API (общие)
     #[error("HTTP request failed with status {status}: {message}")]
     HttpError { status: u16, message: String },
     #[error("API request failed: {0}")]
@@ -44,7 +41,6 @@ pub enum RobloxError {
     #[error("Roblox API returned an error: {0}")]
     RobloxApiError(String),
 
-    // Ошибки аккаунта
     #[error("Account not found: {0}")]
     AccountNotFound(String),
     #[error("Invalid account ID: {0}")]
@@ -56,7 +52,6 @@ pub enum RobloxError {
     #[error("Failed to get account info: {0}")]
     AccountInfoError(String),
 
-    // Ошибки лаунчера и Roblox клиента
     #[error("Invalid place ID: {0}")]
     InvalidPlaceId(String),
     #[error("Game not found: {0}")]
@@ -84,7 +79,6 @@ pub enum RobloxError {
     #[error("Process not found")]
     ProcessNotFound,
 
-    // Ошибки парсинга и данных
     #[error("Missing required field in response: {0}")]
     MissingField(String),
     #[error("Invalid field type in response: {0}")]
@@ -98,7 +92,6 @@ pub enum RobloxError {
     #[error("Cookie validation failed: {0}")]
     CookieValidationFailed(String),
 
-    // Ошибки экономики
     #[error("Failed to get Robux balance: {0}")]
     RobuxBalanceError(String),
     #[error("Failed to get transaction data: {0}")]
@@ -106,7 +99,6 @@ pub enum RobloxError {
     #[error("Failed to get group Robux: {0}")]
     GroupRobuxError(String),
 
-    // Ошибки контента
     #[error("Failed to get favorite games: {0}")]
     FavoriteGamesError(String),
     #[error("Failed to get gamepasses: {0}")]
@@ -114,13 +106,11 @@ pub enum RobloxError {
     #[error("Failed to get badges: {0}")]
     BadgesError(String),
 
-    // Ошибки верификации и страны
     #[error("Failed verified age found {0}")]
     VerifiedAgeError(String),
     #[error("Country code error {0}")]
     CountryCodeError(String),
 
-    // Ошибки друзей и запросов в дружбу
     #[error("Failed to fetch pending friend requests: {0}")]
     FriendRequestsFetchFailed(String),
     #[error("Failed to accept friend request from user {0}: {1}")]
@@ -140,7 +130,6 @@ pub enum RobloxError {
     #[error("Invalid user ID for friend operation: {0}")]
     InvalidFriendUserId(String),
 
-    // Прочие ошибки
     #[error("{0}")]
     Other(String),
     #[error("{0}")]
@@ -173,7 +162,6 @@ impl RobloxError {
         Self::InvalidPlaceId(place_id.into())
     }
 
-    // Новые удобные конструкторы для ошибок друзей
     pub fn friend_request_accept_failed(user_id: u64, reason: impl Into<String>) -> Self {
         Self::FriendRequestAcceptFailed(user_id, reason.into())
     }
