@@ -101,7 +101,7 @@ pub struct Subscription {
     pub active: bool,
     pub expired: bool,
     #[serde(rename = "expirationDate")]
-    pub expiration_date: String, // ISO-8601, можно потом парсить в DateTime<Utc>
+    pub expiration_date: String,
     pub price: u32,
     #[serde(rename = "canRenew")]
     pub can_renew: bool,
@@ -118,7 +118,7 @@ pub struct Permissions {
     #[serde(rename = "clanAllowed")]
     pub clan_allowed: bool,
     #[serde(rename = "enemyClanId")]
-    pub enemy_clan_id: Option<u64>, // может быть null
+    pub enemy_clan_id: Option<u64>,
     #[serde(rename = "friendsAllowed")]
     pub friends_allowed: bool,
 
