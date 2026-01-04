@@ -136,6 +136,21 @@ pub enum RobloxError {
     InvalidLink(String),
     #[error("Access code not found")]
     AccessCodeNotFound,
+    #[error("Unsupported Launch Type")]
+    UnsupportedLaunchType,
+    #[error("ProtocolLinkNotFound")]
+    ProtocolLinkNotFound,
+    #[error("{0}")]
+    ShareLinkParseFailed(String),
+    #[error("{0}")]
+    ShareLinkFetchFailed(String),
+    #[error("{0}")]
+    InvalidProtocolLink(String),
+    #[error("{0}")]
+    InvalidShareLink(String),
+
+    #[error("Not found data in data")]
+    NotFoundData,
 }
 
 impl RobloxError {

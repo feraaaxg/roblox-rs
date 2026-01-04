@@ -1,0 +1,11 @@
+"filename", "language", "Markdown", "Rust", "TOML", "comment", "blank", "total"
+"d:\work\game_checher\roblox_rs\Cargo.lock", "TOML", 0, 0, 2255, 2, 264, 2521
+"d:\work\game_checher\roblox_rs\Cargo.toml", "TOML", 0, 0, 24, 0, 2, 26
+"d:\work\game_checher\roblox_rs\README.md", "Markdown", 3, 0, 0, 0, 0, 3
+"d:\work\game_checher\roblox_rs\examples\get_data.rs", "Rust", 0, 15, 0, 0, 9, 24
+"d:\work\game_checher\roblox_rs\examples\launch.rs", "Rust", 0, 43, 0, 0, 10, 53
+"d:\work\game_checher\roblox_rs\src\account.rs", "Rust", 0, 1235, 0, 0, 170, 1405
+"d:\work\game_checher\roblox_rs\src\app_error.rs", "Rust", 0, 177, 0, 0, 23, 200
+"d:\work\game_checher\roblox_rs\src\lib.rs", "Rust", 0, 120, 0, 0, 12, 132
+"d:\work\game_checher\roblox_rs\src\test.rs", "Rust", 0, 3, 0, 0, 3, 6
+"Total", "-", 3, 1593, 2279, 2, 493, 4370

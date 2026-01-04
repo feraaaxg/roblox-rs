@@ -1,1 +1,5 @@
 + account validation
++ account launch with different type links
+- test for all function
+- documentation
+- example

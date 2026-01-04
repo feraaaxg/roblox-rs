@@ -1,13 +1,49 @@
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, io};
+
+use bon::Builder;
 use log::debug;
+use once_cell::sync::Lazy;
+use rand::Rng;
+
+use regex::Regex;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use reqwest::{Client, IntoUrl, Method, Proxy, RequestBuilder};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use urlencoding::encode;
 
-use crate::Badge;
-use crate::Game;
 use crate::GamePass;
 use crate::User;
 use crate::app_error::RobloxError;
+use crate::{Badge, PrivateServer};
+use crate::{Game, PrivateServerDetails};
+
+static RE_ROBLOX_PROTOCOL_LINK: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"roblox://navigation/share_links\?code=([a-f0-9]+)&type=([A-Za-z]+)").unwrap()
+});
+
+static RE_SHARE_LINK_CODE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"https://www\.roblox\.com/share\?code=([a-f0-9]+)&type=([A-Za-z]+)").unwrap()
+});
+
+static RE_OG_URL: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"code%3D([a-f0-9]+)%26type%3D([A-Za-z]+)").unwrap());
+
+static RE_CANONICAL_LINK: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"/share-links\?code=([a-f0-9]+)&type=([A-Za-z]+)").unwrap());
+
+static RE_DATA_LINK_ID: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"data-link-id="([a-f0-9]+)"\s+data-link-type="([A-Za-z]+)""#).unwrap()
+});
+
+static RE_ANY_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"code=([a-f0-9]{32})").unwrap());
+
+static RE_ANY_TYPE: Lazy<Regex> = Lazy::new(|| Regex::new(r"type=([A-Za-z]+)").unwrap());
+
+static RE_PRIVATE_CODE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"privateServerLinkCode=(\d{20,})").unwrap());
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -906,4 +942,521 @@ impl Account {
             )))
         }
     }
+
+    pub async fn get_my_private_servers(&self) -> Result<Vec<PrivateServer>, RobloxError> {
+        let req = self.make_request(
+            "https://games.roblox.com/v1/private-servers/my-private-servers?cursor=&itemsPerPage=200",
+             Method::GET
+             ).send().await?;
+
+        let json = req.json::<Value>().await?;
+
+        let data_array = json.get("data").ok_or_else(|| RobloxError::NotFoundData)?;
+
+        let servers: Vec<PrivateServer> = serde_json::from_value(data_array.clone())
+            .map_err(|e| RobloxError::ParseError(e.to_string()))?;
+
+        Ok(servers)
+    }
+
+    pub async fn get_private_server_details(
+        &self,
+        private_server_id: u64,
+    ) -> Result<PrivateServerDetails, RobloxError> {
+        let req = self
+            .make_request(
+                format!(
+                    "https://games.roblox.com/v1/vip-servers/{}",
+                    private_server_id
+                ),
+                Method::GET,
+            )
+            .send()
+            .await?;
+
+        let json = req.json::<PrivateServerDetails>().await?;
+
+        Ok(json)
+    }
+
+    pub async fn launch(&mut self, data: LaunchData) -> Result<(), RobloxError> {
+        if let Some(private_code) = &data.private_code {
+            let launch_type = get_launch_type(&private_code);
+
+            match launch_type {
+                LaunchType::PrivateServer => {
+                    self.launch_private_server(data.place_id, private_code.clone())
+                        .await
+                }
+                LaunchType::ShareLink => {
+                    let protocol_link = self.get_protocol_link_from_share(&private_code).await?;
+                    self.launch_with_protocol(protocol_link).await
+                }
+                LaunchType::Standard => self.launch_standard(data.place_id, data.job_id).await,
+            }
+        } else if let Some(job_id) = &data.job_id {
+            self.launch_standard(data.place_id, Some(job_id.clone()))
+                .await
+        } else {
+            self.launch_standard(data.place_id, None).await
+        }
+    }
+
+    async fn launch_private_server(
+        &mut self,
+        place_id: u64,
+        link: String,
+    ) -> Result<(), RobloxError> {
+        let launch_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+        let browser_tracker_id = format!(
+            "{}{}",
+            rand::rng().random_range(100_000..=175_000),
+            rand::rng().random_range(100_000..=900_000)
+        );
+
+        let roblox_path = Account::get_version()? + "\\RobloxPlayerBeta.exe";
+
+        if !Path::new(&roblox_path).exists() {
+            return Err(RobloxError::RobloxExecutableNotFound(roblox_path));
+        }
+
+        let link_code = Account::get_link_code(link);
+
+        let launch_url = format!(
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestPrivateGame&placeId={}&linkCode={}",
+            place_id, link_code
+        );
+
+        let encoded_url = encode(&launch_url).into_owned();
+
+        let arguments = format!(
+            "roblox-player:1+launchmode:play+gameinfo:{}+launchtime:{}+placelauncherurl:{}+browsertrackerid:{}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp",
+            self.get_authentication_ticket().await?,
+            launch_time,
+            encoded_url,
+            browser_tracker_id
+        );
+
+        self.execute_roblox(&roblox_path, &arguments).await
+    }
+
+    async fn launch_with_protocol(&mut self, protocol_link: String) -> Result<(), RobloxError> {
+        if !protocol_link.starts_with("roblox://") {
+            return Err(RobloxError::InvalidProtocolLink(protocol_link));
+        }
+
+        let roblox_path = Account::get_version()? + "\\RobloxPlayerBeta.exe";
+
+        if !Path::new(&roblox_path).exists() {
+            return Err(RobloxError::RobloxExecutableNotFound(roblox_path));
+        }
+
+        let arguments = protocol_link;
+
+        self.execute_roblox(&roblox_path, &arguments).await
+    }
+
+    pub async fn launch_standard(
+        &mut self,
+        place_id: u64,
+        job_id: Option<String>,
+    ) -> Result<(), RobloxError> {
+        let launch_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+
+        let browser_tracker_id = format!(
+            "{}{}",
+            rand::rng().random_range(100_000..=175_000),
+            rand::rng().random_range(100_000..=900_000)
+        );
+
+        let roblox_path = Account::get_version()? + "\\RobloxPlayerBeta.exe";
+
+        if !Path::new(&roblox_path).exists() {
+            return Err(RobloxError::RobloxExecutableNotFound(roblox_path));
+        }
+
+        let job_id_param = match job_id {
+            Some(id) => {
+                format!("&gameId={}", id)
+            }
+            None => {
+                let job_id = self.job_id(place_id.to_string()).await?;
+                if !job_id.is_empty() {
+                    format!("&gameId={}", job_id)
+                } else {
+                    String::new()
+                }
+            }
+        };
+
+        let launch_url = format!(
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={}{}&isPlayTogetherGame=false&isTeleport=true",
+            place_id, job_id_param
+        );
+
+        let encoded_url = encode(&launch_url).into_owned();
+
+        let arguments = format!(
+            "roblox-player:1+launchmode:play+gameinfo:{}+launchtime:{}+placelauncherurl:{}+browsertrackerid:{}+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp",
+            self.get_authentication_ticket().await?,
+            launch_time,
+            encoded_url,
+            browser_tracker_id
+        );
+
+        self.execute_roblox(&roblox_path, &arguments).await
+    }
+
+    async fn execute_roblox(
+        &mut self,
+        roblox_path: &str,
+        arguments: &str,
+    ) -> Result<(), RobloxError> {
+        use std::process::Command;
+
+        if self.is_active() {
+            return Err(RobloxError::ProcessAlreadyRunning);
+        }
+
+        let process = Command::new(roblox_path)
+            .arg(arguments)
+            .spawn()
+            .map_err(|e| {
+                RobloxError::LaunchFailed(format!("Failed to spawn Roblox process: {}", e))
+            })?;
+
+        self.pid = Some(process.id());
+
+        Ok(())
+    }
+
+    async fn get_protocol_link_from_share(&self, share_link: &str) -> Result<String, RobloxError> {
+        if share_link.starts_with("roblox://") {
+            return Ok(share_link.to_string());
+        }
+
+        if share_link.contains("/share?") {
+            let response = self
+                .client
+                .get(share_link)
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                )
+                .send()
+                .await
+                .map_err(|e| RobloxError::ShareLinkFetchFailed(e.to_string()))?;
+
+            if !response.status().is_success() {
+                return Err(RobloxError::ShareLinkFetchFailed(format!(
+                    "HTTP статус: {}",
+                    response.status()
+                )));
+            }
+
+            let html = response
+                .text()
+                .await
+                .map_err(|e| RobloxError::ShareLinkParseFailed(e.to_string()))?;
+
+            if let Some((code, link_type)) = extract_share_link_info(&html) {
+                let protocol_link = create_roblox_protocol_link(&code, &link_type);
+
+                return Ok(protocol_link);
+            }
+
+            return Err(RobloxError::ProtocolLinkNotFound);
+        }
+
+        Err(RobloxError::InvalidShareLink(share_link.to_string()))
+    }
+
+    pub async fn job_id(&self, place_id: String) -> Result<String, RobloxError> {
+        let url = format!(
+            "https://games.roblox.com/v1/games/{}/servers/0?sortOrder=1&excludeFullGames=true&limit=25",
+            place_id
+        );
+
+        let request = self.make_request(&url, reqwest::Method::GET);
+        let response = request.send().await.map_err(|e| {
+            RobloxError::ApiError(format!(
+                "Failed to fetch servers for place {}: {}",
+                place_id, e
+            ))
+        })?;
+
+        if !response.status().is_success() {
+            return Err(RobloxError::HttpError {
+                status: response.status().as_u16(),
+                message: format!("Failed to get job ID for place {}", place_id),
+            });
+        }
+
+        let json: Value = response.json().await.map_err(|e| {
+            RobloxError::ParseError(format!("Failed to parse JSON response: {}", e))
+        })?;
+
+        if let Some(id) = json
+            .get("data")
+            .and_then(|d| d.get(7))
+            .and_then(|entry| entry.get("id"))
+            .and_then(|id| id.as_str())
+        {
+            return Ok(id.to_string());
+        }
+
+        let retry_request = self.make_request(&url, reqwest::Method::GET);
+        let retry_response = retry_request.send().await.map_err(|e| {
+            RobloxError::ApiError(format!(
+                "Retry failed to fetch servers for place {}: {}",
+                place_id, e
+            ))
+        })?;
+
+        if !retry_response.status().is_success() {
+            return Err(RobloxError::HttpError {
+                status: retry_response.status().as_u16(),
+                message: format!("Failed to get job ID for place {} on retry", place_id),
+            });
+        }
+
+        let retry_json: Value = retry_response.json().await.map_err(|e| {
+            RobloxError::ParseError(format!("Failed to parse JSON response (retry): {}", e))
+        })?;
+
+        let id = retry_json
+            .get("data")
+            .and_then(|d| d.get(4))
+            .and_then(|entry| entry.get("id"))
+            .and_then(|id| id.as_str())
+            .ok_or_else(|| RobloxError::MissingField("id in data[4]".to_string()))?;
+
+        Ok(id.to_string())
+    }
+
+    pub fn get_link_code(private_server_link: String) -> String {
+        let url = private_server_link;
+
+        RE_PRIVATE_CODE
+            .captures(url.as_str())
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn get_version() -> Result<String, RobloxError> {
+        let username = whoami::username();
+        if username.is_empty() {
+            return Err(RobloxError::UsernameError(
+                "Unable to get username".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "fishtrap"))]
+        let x1 = format!("C:\\Users\\{}\\AppData\\Local\\Roblox\\Versions", username);
+
+        #[cfg(feature = "fishtrap")]
+        let x1 = format!(
+            "C:\\Users\\{}\\AppData\\Local\\Fishstrap\\Versions",
+            username
+        );
+
+        let new_path = x1.to_owned();
+
+        let all_dirs: Vec<_> = fs::read_dir(&new_path)
+            .map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    RobloxError::RobloxNotInstalled
+                } else {
+                    RobloxError::VersionNotFound(format!(
+                        "Failed to read Roblox versions directory: {}",
+                        e
+                    ))
+                }
+            })?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_dir()
+                    && path.file_name().map_or(false, |name| {
+                        name.to_str().map_or(false, |s| s.contains("version-"))
+                    })
+                {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if all_dirs.is_empty() {
+            return Err(RobloxError::VersionNotFound(format!(
+                "No directories containing 'version-' found in {}",
+                new_path
+            )));
+        }
+
+        let latest_dir = all_dirs
+            .into_iter()
+            .max_by_key(|path| {
+                fs::metadata(path)
+                    .and_then(|meta| meta.created())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+            .ok_or_else(|| {
+                RobloxError::VersionNotFound("Failed to determine latest directory".to_string())
+            })?;
+
+        let latest_dir_str = latest_dir
+            .to_str()
+            .ok_or_else(|| {
+                RobloxError::VersionNotFound("Failed to convert path to string".to_string())
+            })?
+            .to_string();
+
+        Ok(latest_dir_str)
+    }
+
+    fn is_active(&self) -> bool {
+        self.pid.is_some()
+    }
+
+    pub fn close(&mut self) -> Result<(), RobloxError> {
+        if let Some(pid) = self.pid {
+            #[cfg(target_os = "windows")]
+            {
+                use std::process::Command;
+
+                let output = Command::new("taskkill")
+                    .args(&["/F", "/PID", &pid.to_string()])
+                    .output()
+                    .map_err(|e| RobloxError::ProcessKillFailed(e.to_string()))?;
+
+                if output.status.success() {
+                    self.pid = None;
+                    Ok(())
+                } else {
+                    use std::process::Command;
+                    let check_output = Command::new("tasklist")
+                        .args(&["/FI", &format!("PID eq {}", pid)])
+                        .output();
+
+                    let is_running = check_output
+                        .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+                        .unwrap_or(false);
+
+                    if is_running {
+                        Err(RobloxError::ProcessKillFailed(format!(
+                            "Failed to kill process {}",
+                            pid
+                        )))
+                    } else {
+                        self.pid = None;
+                        Ok(())
+                    }
+                }
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub fn extract_share_link_info(html: &str) -> Option<(String, String)> {
+    if let Some(caps) = RE_ROBLOX_PROTOCOL_LINK.captures(html) {
+        return Some((caps[1].to_string(), caps[2].to_string()));
+    }
+
+    if let Some(caps) = RE_DATA_LINK_ID.captures(html) {
+        println!("caps: {:?}", &caps);
+        return Some((caps[1].to_string(), caps[2].to_string()));
+    }
+    if let Some(caps) = RE_OG_URL.captures(html) {
+        return Some((caps[1].to_string(), caps[2].to_string()));
+    }
+
+    if let Some(caps) = RE_CANONICAL_LINK.captures(html) {
+        return Some((caps[1].to_string(), caps[2].to_string()));
+    }
+
+    let code = RE_ANY_CODE.captures(html).map(|caps| caps[1].to_string());
+    let link_type = RE_ANY_TYPE.captures(html).map(|caps| caps[1].to_string());
+
+    if let (Some(code), Some(link_type)) = (code, link_type) {
+        return Some((code, link_type));
+    }
+
+    None
+}
+
+pub fn create_roblox_protocol_link(code: &str, link_type: &str) -> String {
+    format!(
+        "roblox://navigation/share_links?code={}&type={}",
+        code, link_type
+    )
+}
+
+pub fn get_link_code(link: String) -> String {
+    if link.contains("privateServerLinkCode") {
+        RE_PRIVATE_CODE
+            .captures(&link)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    } else if link.contains("roblox://") {
+        RE_ROBLOX_PROTOCOL_LINK
+            .captures(&link)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    } else if link.contains("/share?") {
+        RE_SHARE_LINK_CODE
+            .captures(&link)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+pub fn get_launch_type(url: &str) -> LaunchType {
+    if url.contains("privateServerLinkCode") {
+        LaunchType::PrivateServer
+    } else if url.contains("/share?") || url.contains("/share-links?") {
+        LaunchType::ShareLink
+    } else {
+        LaunchType::Standard
+    }
+}
+
+#[derive(Clone, Builder)]
+pub struct LaunchData {
+    place_id: u64,
+    private_code: Option<String>,
+    job_id: Option<String>,
+    custom_path: Option<String>,
+}
+
+impl LaunchData {
+    pub fn new(
+        place_id: u64,
+        private_code: Option<String>,
+        job_id: Option<String>,
+        custom_path: Option<String>,
+    ) -> LaunchData {
+        Self {
+            place_id,
+            private_code,
+            job_id,
+            custom_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LaunchType {
+    PrivateServer,
+    ShareLink,
+    Standard,
 }
